@@ -196,7 +196,7 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
     useCot ? (params.useCotMetas !== false) : false,                                   // 39: CoT Metas
     useCot ? (params.useCotCaption !== false) : false,                                 // 40: CaptionRewrite
     useCot ? (params.useCotLanguage !== false) : false,                                // 41: CoT Language
-    false,                                                                             // 42: Is Format Caption State (ACE-Step 1.5)
+    // Position 42 (is_format_caption_state) is a Gradio state var — client inserts null automatically
     params.constrainedDecodingDebug === true,                                          // 43: Constrained Decoding Debug
     params.allowLmBatch !== false,                                                     // 44: ParallelThinking
     params.getScores === true,                                                         // 45: Auto Score
@@ -214,8 +214,8 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
     params.repaintMode || 'balanced',                                                  // 57: Repaint Mode (ACE-Step 1.5)
     params.repaintStrength ?? 0.5,                                                     // 58: Repaint Strength (ACE-Step 1.5)
     params.autogen === true,                                                           // 59: AutoGen
-    // Note: current_batch_index, total_batches, batch_queue, generation_params_state
-    // are hidden Gradio state variables — do NOT pass via client.predict()
+    // Note: is_format_caption_state (42), current_batch_index (60), total_batches (61),
+    // batch_queue (62), generation_params_state (63) are Gradio state vars — client handles them
   ];
 }
 
