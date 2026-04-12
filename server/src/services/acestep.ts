@@ -528,6 +528,7 @@ async function processGeneration(
     }
   } else {
     throw new Error('ACE-Step Gradio backend is not available. Check that ace-step-api is running and healthy.');
+  }
 }
 
 async function processGenerationViaGradio(
