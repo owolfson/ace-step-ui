@@ -557,7 +557,14 @@ async function processGenerationViaGradio(
   job.stage = 'Generating music via Gradio...';
 
   // predict() blocks until generation is complete
-  const result = await client.predict('/generation_wrapper', args);
+  // Reset client on failure so stale sessions don't poison subsequent calls
+  let result: Awaited<ReturnType<typeof client.predict>>;
+  try {
+    result = await client.predict('/generation_wrapper', args);
+  } catch (err) {
+    resetGradioClient();
+    throw err;
+  }
   const data = result.data as unknown[];
 
   if (!Array.isArray(data) || data.length === 0) {
