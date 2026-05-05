@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { tagMp3 } from '../services/mp3tagging.js';
 import { Readable } from 'node:stream';
 import { v4 as uuidv4 } from 'uuid';
 import { pool } from '../db/pool.js';
@@ -342,6 +343,8 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
     );
 
     res.status(201).json({ song: result.rows[0] });
+      // MP3-TAG-HOOK-POST: auto-tag the new song's mp3 file
+      tagMp3(result.rows[0]).catch((e: any) => console.warn('[mp3tag]', e.message));
   } catch (error) {
     console.error('Create song error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -389,9 +392,106 @@ router.patch('/:id', authMiddleware, async (req: AuthenticatedRequest, res: Resp
     );
 
     res.json({ song: result.rows[0] });
+        // MP3-TAG-HOOK-PATCH: re-tag if any tag-relevant field changed
+        const _tagFields = ['title','style','caption','cover_url'];
+        if (_tagFields.some(f => (req.body as any)[f] !== undefined)) {
+          tagMp3(result.rows[0]).catch((e: any) => console.warn('[mp3tag]', e.message));
+        }
   } catch (error) {
     console.error('Update song error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// COVER-GEN-ENDPOINT — generate album art via gemma3 prompt-builder + LTX-Desktop image gen
+router.post('/:id/cover', authMiddleware, async (req: any, res: any) => {
+  try {
+    const songRes = await pool.query('SELECT * FROM songs WHERE id = $1', [req.params.id]);
+    if (!songRes.rows.length) { res.status(404).json({ error: 'Song not found' }); return; }
+    const song = songRes.rows[0];
+    if (song.user_id !== req.user.id) { res.status(403).json({ error: 'Access denied' }); return; }
+
+    const ollamaBase = (process.env.OLLAMA_URL || 'http://host.docker.internal:11434').replace(/\/+$/, '');
+    const lyricsModel = process.env.LYRICS_MODEL || 'gemma3:12b';
+    const ltxBase = (process.env.LTX_DESKTOP_URL || 'http://host.docker.internal:8781').replace(/\/+$/, '');
+    const arbiterBase = (process.env.GPU_ARBITER_URL || 'http://host.docker.internal:6001').replace(/\/+$/, '');
+
+    // Step 1: build visual prompt via gemma3 (style + title + first lyric lines)
+    const lyricSnippet = (song.lyrics || '').split('\n').filter((l: string) => l.trim() && !l.trim().startsWith('[')).slice(0, 6).join(' / ');
+    const promptToGemma = `Write a single-paragraph visual prompt for an album cover image.\nStyle: square 1:1 composition, photographic or illustrated to match the genre, no text, no watermark, no logos, vivid mood-driven imagery.\nOutput ONLY the visual prompt as one paragraph, no preamble or explanation.\n\nSong title: ${song.title || 'Untitled'}\nMusic style: ${song.style || song.caption || ''}\nLyric vibe: ${lyricSnippet}`;
+
+    let visualPrompt = (song.title || '') + ' album cover, ' + (song.style || song.caption || '');
+    try {
+      const r = await fetch(ollamaBase + '/api/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: lyricsModel, prompt: promptToGemma, stream: false, keep_alive: 0, options: { num_predict: 512 } }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (r.ok) {
+        const d: any = await r.json();
+        let g = (d.response || '').trim().replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '').replace(/[^\x00-\x7F\n\r\t]/g, '').trim();
+        if (g.length > 30) visualPrompt = g.split('\n').filter(Boolean)[0] || g;
+      }
+    } catch (e: any) { console.warn('[cover] gemma prompt failed, using fallback:', e.message); }
+
+    // Step 2: swap GPU to ltx-desktop (allow up to 6min for cold load)
+    try {
+      await fetch(arbiterBase + '/swap-to/ltx-desktop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(360_000) });
+    } catch (e: any) { console.warn('[cover] arbiter swap-to/ltx-desktop failed:', e.message); }
+
+    // Step 3: generate image via ltx-desktop
+    let imageBuf: Buffer | null = null;
+    try {
+      const ir = await fetch(ltxBase + '/api/generate-image', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: visualPrompt, width: 1024, height: 1024, numImages: 1, numSteps: 8 }),
+        signal: AbortSignal.timeout(180_000),
+      });
+      if (ir.ok) {
+        const ij: any = await ir.json();
+        const ipaths = ij.image_paths || [];
+        if (ipaths.length) {
+          const fname = ipaths[0].split('/').pop();
+          const dr = await fetch(ltxBase + '/api/image/' + fname, { signal: AbortSignal.timeout(30_000) });
+          if (dr.ok) imageBuf = Buffer.from(await dr.arrayBuffer());
+        }
+      } else {
+        console.warn('[cover] ltx /api/generate-image status:', ir.status);
+      }
+    } catch (e: any) { console.warn('[cover] ltx generate-image failed:', e.message); }
+
+    // Always swap back to hermes regardless of success/failure
+    try { await fetch(arbiterBase + '/swap-to/hermes-llm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(60_000) }); } catch (e: any) { console.warn('[cover] arbiter swap-back failed:', e.message); }
+
+    if (!imageBuf) {
+      res.status(502).json({ error: 'Image generation failed (LTX returned no image)' });
+      return;
+    }
+
+    // Step 4: save to public/audio/<userId>/<songId>_cover.png
+    const fs2 = await import('fs/promises');
+    const path2 = await import('path');
+    // Hardcoded path — matches Express static mount in index.ts and avoids
+    // ESM __dirname complications (not defined in ES module scope).
+    const PUB = '/app/server/public/audio';
+    const coverDir = path2.join(PUB, song.user_id);
+    await fs2.mkdir(coverDir, { recursive: true });
+    const coverFile = path2.join(coverDir, song.id + '_cover.png');
+    await fs2.writeFile(coverFile, imageBuf);
+    const coverUrl = '/audio/' + song.user_id + '/' + song.id + '_cover.png';
+
+    // Step 5: update DB row
+    const upd = await pool.query('UPDATE songs SET cover_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *', [coverUrl, song.id]);
+    const updated = upd.rows[0];
+
+    // Step 6: re-tag MP3 with the new cover (synchronous so caller knows it's embedded)
+    await tagMp3(updated);
+
+    res.json({ song: updated, cover_url: coverUrl, prompt: visualPrompt });
+  } catch (error: any) {
+    console.error('[cover] error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 

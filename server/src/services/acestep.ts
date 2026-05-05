@@ -2,7 +2,8 @@ import { writeFile, mkdir, copyFile, rm, readFile } from 'fs/promises';
 import { spawn, execSync } from 'child_process';
 import { existsSync } from 'fs';
 import path from 'path';
-import { handle_file } from '@gradio/client';
+// handle_file removed — native API takes file path strings, not Gradio upload handles
+const handle_file = (input: any): any => typeof input === 'string' ? input : (input?.url || null);
 
 // Get audio duration using ffprobe
 function getAudioDuration(filePath: string): number {
@@ -330,7 +331,7 @@ export interface GenerationParams {
   lmBatchChunkSize?: number;
   trackName?: string;
   completeTrackClasses?: string[];
-  isFormatCaption?: boolean;
+    // isFormatCaption: Gradio State (api_info=None) — NOT sent via API
 
   // ACE-Step 1.5 new params
   samplerMode?: 'euler' | 'heun';

@@ -426,6 +426,50 @@ cron.schedule('0 3 * * *', async () => {
 });
 
 // Start server on all interfaces for LAN access
+
+// Strip Helmet CSP — allows Tailwind CDN + Google Fonts
+app.use((_req: any, res: any, next: any) => { res.removeHeader('Content-Security-Policy'); next(); });
+
+// ── SPA static serving ──────────────────────────────────────────────────────
+const _spaDir = path.join(__dirname, '../public/app');
+app.use(express.static(_spaDir));
+app.get('/index.css', (_req: any, res: any) => { res.setHeader('Content-Type','text/css'); res.end(''); });
+app.get('*', (req: any, res: any, next: any) => {
+  const skip = ['/api','/audio','/voices','/editor','/demucs-web','/blog'];
+  if (skip.some(p => req.path.startsWith(p))) return next();
+  res.sendFile(path.join(_spaDir, 'index.html'));
+});
+// ────────────────────────────────────────────────────────────────────────────
+
+// ── Voice library (chatterbox reference voices for Style Reference) ─────────
+// Mounted from /mnt/user/appdata/chatterbox-tts/voices read-only via compose.
+const _voicesDir = path.join(__dirname, '../public/voices');
+app.use('/voices', express.static(_voicesDir));
+app.get('/api/voices/list', async (_req: any, res: any) => {
+  try {
+    const fs2 = await import('fs/promises');
+    let entries: any[] = [];
+    try { entries = await fs2.readdir(_voicesDir, { withFileTypes: true }); } catch { res.json({ voices: [], count: 0 }); return; }
+    const out: any[] = [];
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const name = e.name;
+      const lower = name.toLowerCase();
+      if (!/\.(wav|mp3|ogg|flac|m4a|opus)$/.test(lower)) continue;
+      let sizeBytes = 0;
+      try { sizeBytes = (await fs2.stat(path.join(_voicesDir, name))).size; } catch {}
+      const label = name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ')
+        .replace(/\b\w/g, (c: string) => c.toUpperCase());
+      out.push({ name, label, url: '/voices/' + encodeURIComponent(name), sizeBytes });
+    }
+    out.sort((a, b) => a.label.localeCompare(b.label));
+    res.json({ voices: out, count: out.length });
+  } catch (error: any) {
+    console.error('[voices] list error:', error);
+    res.status(500).json({ error: error.message || 'Failed to list voices' });
+  }
+});
+// ────────────────────────────────────────────────────────────────────────────
 app.listen(config.port, '0.0.0.0', () => {
   console.log(`ACE-Step UI Server running on http://localhost:${config.port}`);
   console.log(`Environment: ${config.nodeEnv}`);

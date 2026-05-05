@@ -96,4 +96,54 @@ router.get('/status', authMiddleware, async (_req: AuthenticatedRequest, res: Re
   res.json(loraState);
 });
 
+// ── List endpoint (LoRA picker) ────────────────────────────────────────────
+router.get('/list', authMiddleware, async (_req, res) => {
+  try {
+    const fs = await import('fs/promises');
+    const path = await import('path');
+    const root = process.env.LORA_ROOT || '/app/ACE-Step-1.5/checkpoints/loras';
+    const out = [];
+    async function walk(dir: string, collection: string) {
+      let entries: any[] = [];
+      try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+      let meta: any = {};
+      for (const e of entries) {
+        if (e.isFile() && e.name === 'meta.json') {
+          try { meta = JSON.parse(await fs.readFile(path.join(dir, 'meta.json'), 'utf8')); } catch {}
+        }
+      }
+      const def: any = meta.default || {};
+      for (const e of entries) {
+        if (e.isDirectory()) {
+          await walk(path.join(dir, e.name), e.name);
+        } else if (e.isFile() && e.name.endsWith('.safetensors')) {
+          const full = path.join(dir, e.name);
+          let sizeBytes = 0;
+          try { sizeBytes = (await fs.stat(full)).size; } catch {}
+          const m: any = meta[e.name] || {};
+          const fallbackLabel = e.name
+            .replace(/_adapter_model\.safetensors$/, '')
+            .replace(/\.safetensors$/, '')
+            .replace(/_/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim() || e.name;
+          out.push({
+            path: full,
+            label: m.label || fallbackLabel,
+            collection: def.collection || collection,
+            description: m.description || def.description || '',
+            sizeBytes,
+          });
+        }
+      }
+    }
+    await walk(root, path.basename(root));
+    out.sort((a, b) => (a.collection + a.label).localeCompare(b.collection + b.label));
+    res.json({ loras: out, count: out.length });
+  } catch (error) {
+    console.error('[LoRA] List error:', error);
+    res.status(500).json({ error: (error && error.message) || 'Failed to list LoRAs' });
+  }
+});
+
 export default router;

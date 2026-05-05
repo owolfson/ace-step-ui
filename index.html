@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en" class="dark">
   <head>
+  <script id="ace-dark-init">(function(){try{var t=localStorage.getItem('theme');if(!t){localStorage.setItem('theme','dark');t='dark';}if(t==='dark')document.documentElement.classList.add('dark');else document.documentElement.classList.remove('dark');}catch(e){}})();</script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ACE-Step UI - Local AI Music Generator</title>
@@ -262,5 +263,410 @@
   <body class="bg-suno text-zinc-900 dark:text-white overflow-hidden transition-colors duration-300">
     <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
+<script id="ace-lora-picker">
+/* LoRA picker — DOM augmentation for fspecii ace-step-ui (Owen, 2026-04-27) */
+(function () {
+  if (window.__aceLoraPicker) return;
+  window.__aceLoraPicker = true;
+
+  const TOKEN_KEYS = ['token', 'auth_token', 'jwt', 'access_token', 'ace-token'];
+  const getToken = () => {
+    for (const k of TOKEN_KEYS) {
+      const v = localStorage.getItem(k);
+      if (v && v.length > 20) return v.replace(/^"|"$/g, '');
+    }
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        const v = localStorage.getItem(k);
+        if (!v) continue;
+        if (v.startsWith('eyJ') && v.length > 40) return v;
+        try {
+          const parsed = JSON.parse(v);
+          if (parsed && typeof parsed === 'object') {
+            for (const tk of TOKEN_KEYS) if (parsed[tk]) return parsed[tk];
+            if (parsed.state && parsed.state.token) return parsed.state.token;
+          }
+        } catch {}
+      }
+    } catch {}
+    return null;
+  };
+
+  const setReactInputValue = (el, value) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  const fmtSize = (b) => {
+    if (!b) return '';
+    const mb = b / (1024 * 1024);
+    return mb > 1024 ? (mb / 1024).toFixed(1) + ' GB' : mb.toFixed(0) + ' MB';
+  };
+
+  const openModal = async (input) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#1a1a1a;color:#eee;border-radius:12px;padding:20px;max-width:720px;width:100%;max-height:80vh;overflow:auto;font-family:system-ui,sans-serif;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+    box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;"><div style="font-size:18px;font-weight:600;">Pick a LoRA</div><button id="ace-lora-close" style="background:#333;color:#eee;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;">Close</button></div><div id="ace-lora-body" style="font-size:14px;color:#aaa;">Loading…</div>';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    box.querySelector('#ace-lora-close').onclick = () => overlay.remove();
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+    const body = box.querySelector('#ace-lora-body');
+    try {
+      const token = getToken();
+      const res = await fetch('/api/lora/list', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!data.loras || !data.loras.length) {
+        body.textContent = 'No LoRAs found in /app/ACE-Step-1.5/checkpoints/loras/';
+        return;
+      }
+
+      const groups = {};
+      for (const l of data.loras) (groups[l.collection] = groups[l.collection] || []).push(l);
+      body.innerHTML = '';
+      for (const [coll, items] of Object.entries(groups)) {
+        const h = document.createElement('div');
+        h.textContent = coll;
+        h.style.cssText = 'font-weight:600;margin:14px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#888;';
+        body.appendChild(h);
+        for (const l of items) {
+          const card = document.createElement('div');
+          card.style.cssText = 'background:#252525;border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:8px;cursor:pointer;transition:background 0.15s;';
+          card.onmouseenter = () => card.style.background = '#2e2e2e';
+          card.onmouseleave = () => card.style.background = '#252525';
+          const safeLabel = String(l.label || '').replace(/[<>&]/g, '');
+          const safeDesc = String(l.description || '').replace(/[<>&]/g, '');
+          card.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px;">'
+            + '<div style="flex:1;">'
+            + '<div style="color:#fff;font-weight:500;margin-bottom:3px;">' + safeLabel + '</div>'
+            + '<div style="color:#aaa;font-size:13px;">' + safeDesc + '</div>'
+            + '</div>'
+            + '<div style="color:#666;font-size:12px;white-space:nowrap;">' + fmtSize(l.sizeBytes) + '</div>'
+            + '</div>';
+          card.onclick = () => {
+            setReactInputValue(input, l.path);
+            overlay.remove();
+          };
+          body.appendChild(card);
+        }
+      }
+    } catch (e) {
+      body.innerHTML = '<div style="color:#f88;">Failed to load LoRAs: ' + ((e && e.message) || e) + '</div>';
+    }
+  };
+
+  const findLoraInput = () => {
+    const all = document.querySelectorAll('input[type="text"], input:not([type])');
+    for (const el of all) {
+      const placeholder = (el.placeholder || '').toLowerCase();
+      const name = (el.name || '').toLowerCase();
+      const id = (el.id || '').toLowerCase();
+      if (placeholder.includes('lora') || name.includes('lora') || id.includes('lora')) {
+        return el;
+      }
+      if (placeholder.includes('path') && el.closest('[class*="lora" i], [id*="lora" i]')) {
+        return el;
+      }
+    }
+    return null;
+  };
+
+  const enhance = (input) => {
+    if (input.dataset.aceLoraEnhanced) return;
+    input.dataset.aceLoraEnhanced = '1';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '📂 Browse';
+    btn.style.cssText = 'margin-left:6px;padding:6px 10px;font-size:13px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;vertical-align:middle;';
+    btn.onclick = (e) => { e.preventDefault(); openModal(input); };
+    input.insertAdjacentElement('afterend', btn);
+  };
+
+  const tryEnhance = () => {
+    const input = findLoraInput();
+    if (input) enhance(input);
+  };
+
+  const observer = new MutationObserver(() => tryEnhance());
+  observer.observe(document.body, { childList: true, subtree: true });
+  tryEnhance();
+})();
+
+</script>
+<script id="ace-cover-picker">
+/* Cover-picker — DOM augmentation that adds "Generate Cover" button to song players (Owen, 2026-05-02) */
+(function () {
+  if (window.__aceCoverPicker) return;
+  window.__aceCoverPicker = true;
+
+  const TOKEN_KEYS = ['token', 'auth_token', 'jwt', 'access_token', 'ace-token'];
+  const getToken = () => {
+    for (const k of TOKEN_KEYS) {
+      const v = localStorage.getItem(k);
+      if (v && v.length > 20) return v.replace(/^"|"$/g, '');
+    }
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        const v = localStorage.getItem(k);
+        if (!v) continue;
+        if (v.startsWith('eyJ') && v.length > 40) return v;
+        try {
+          const parsed = JSON.parse(v);
+          if (parsed && typeof parsed === 'object') {
+            for (const tk of TOKEN_KEYS) if (parsed[tk]) return parsed[tk];
+            if (parsed.state && parsed.state.token) return parsed.state.token;
+          }
+        } catch {}
+      }
+    } catch {}
+    return null;
+  };
+
+  // Extract song UUID from "/audio/<userId>/<songId>.mp3" — songId = DB row id.
+  const songIdFromSrc = (src) => {
+    if (!src) return null;
+    const m = src.match(/\/audio\/[^/]+\/([0-9a-f-]{8,})\.[a-z0-9]{2,5}/i);
+    return m ? m[1] : null;
+  };
+
+  const showStatus = (btn, msg, color) => {
+    btn.textContent = msg;
+    btn.style.background = color || '#2563eb';
+    btn.disabled = msg !== '🎨 Cover';
+  };
+
+  const generateCover = async (songId, btn) => {
+    const token = getToken();
+    if (!token) { showStatus(btn, '⚠ no auth', '#a33'); return; }
+    showStatus(btn, '⏳ generating...', '#888');
+    const t0 = Date.now();
+    try {
+      const res = await fetch('/api/songs/' + songId + '/cover', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const dt = Math.round((Date.now() - t0) / 1000);
+      if (!res.ok) {
+        const err = await res.text().catch(() => '');
+        showStatus(btn, '✗ failed (' + res.status + ')', '#a33');
+        console.error('[cover] failed:', err);
+        setTimeout(() => showStatus(btn, '🎨 Cover'), 5000);
+        return;
+      }
+      const data = await res.json();
+      showStatus(btn, '✓ done ' + dt + 's', '#2a8');
+      console.log('[cover] generated:', data.cover_url, '\nprompt:', data.prompt);
+      setTimeout(() => showStatus(btn, '🎨 Cover'), 4000);
+    } catch (e) {
+      showStatus(btn, '✗ ' + (e.message || 'error'), '#a33');
+      setTimeout(() => showStatus(btn, '🎨 Cover'), 5000);
+    }
+  };
+
+  const enhanceAudio = (audio) => {
+    if (audio.dataset.aceCoverEnhanced) return;
+    const songId = songIdFromSrc(audio.src || audio.currentSrc || (audio.querySelector('source') || {}).src);
+    if (!songId) return;
+    audio.dataset.aceCoverEnhanced = '1';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '🎨 Cover';
+    btn.title = 'Generate album art (gemma3 prompt + LTX image, ~30-45s)';
+    btn.style.cssText = 'margin-left:8px;padding:5px 10px;font-size:12px;background:#2563eb;color:#fff;border:none;border-radius:6px;cursor:pointer;vertical-align:middle;font-family:system-ui,sans-serif;';
+    btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); generateCover(songId, btn); };
+    audio.insertAdjacentElement('afterend', btn);
+  };
+
+  const sweep = () => {
+    document.querySelectorAll('audio').forEach(enhanceAudio);
+  };
+
+  const observer = new MutationObserver(sweep);
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+  sweep();
+})();
+
+</script>
+<script id="ace-voice-picker">
+/* Voice-picker — DOM augmentation for ACE-Step Style Reference (Owen, 2026-05-04)
+ * Adds a "🎙️ Voices" button that opens a modal listing voices from
+ * /mnt/user/appdata/chatterbox-tts/voices/ (mounted at /voices/ and listed via
+ * GET /api/voices/list). Click a voice → fetches the file → drops it into the
+ * Style Reference file input via DataTransfer. */
+(function () {
+  if (window.__aceVoicePicker) return;
+  window.__aceVoicePicker = true;
+
+  const fmtSize = (b) => {
+    if (!b) return '';
+    const mb = b / (1024 * 1024);
+    return mb >= 1 ? mb.toFixed(1) + ' MB' : (b / 1024).toFixed(0) + ' KB';
+  };
+
+  const fileInputForReference = () => {
+    // Try to find the most-specific audio file input first
+    const inputs = [...document.querySelectorAll('input[type="file"]')];
+    // Audio-accepting inputs
+    const audio = inputs.filter(i => {
+      const a = (i.accept || '').toLowerCase();
+      return a.includes('audio') || a.includes('.mp3') || a.includes('.wav') || a.includes('.flac');
+    });
+    if (audio.length === 1) return audio[0];
+    // If multiple, prefer one whose parent contains "reference" or "style"
+    if (audio.length > 1) {
+      for (const i of audio) {
+        const ctx = (i.closest('[class*="reference" i],[class*="style" i],[id*="reference" i]') || i.parentElement);
+        if (ctx && /reference|style/i.test(ctx.outerHTML.slice(0, 600))) return i;
+      }
+      return audio[0];
+    }
+    // Fallback: any file input
+    return inputs[0] || null;
+  };
+
+  const setFileOnInput = (input, file) => {
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      // Use the native setter to bypass React's controlled-input guard
+      const desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'files');
+      if (desc && desc.set) desc.set.call(input, dt.files);
+      else input.files = dt.files;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    } catch (e) {
+      console.error('[voice-picker] setFileOnInput error:', e);
+      return false;
+    }
+  };
+
+  const useVoice = async (voice, statusEl) => {
+    statusEl.textContent = '⏳ fetching ' + voice.label + '...';
+    statusEl.style.color = '#aaa';
+    try {
+      const r = await fetch(voice.url);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob();
+      const file = new File([blob], voice.name, { type: blob.type || 'audio/mpeg' });
+      const input = fileInputForReference();
+      if (!input) {
+        statusEl.textContent = '✗ no file input found on the page — open the Style Reference panel first';
+        statusEl.style.color = '#f88';
+        return false;
+      }
+      const ok = setFileOnInput(input, file);
+      if (!ok) {
+        statusEl.textContent = '✗ failed to attach file to input';
+        statusEl.style.color = '#f88';
+        return false;
+      }
+      statusEl.textContent = '✓ ' + voice.label + ' loaded as Style Reference';
+      statusEl.style.color = '#5d5';
+      return true;
+    } catch (e) {
+      statusEl.textContent = '✗ ' + (e.message || 'error');
+      statusEl.style.color = '#f88';
+      return false;
+    }
+  };
+
+  const openModal = async () => {
+    if (document.getElementById('ace-voice-modal')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'ace-voice-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;font-family:system-ui,sans-serif;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#1a1a1a;color:#eee;border-radius:12px;padding:20px;max-width:640px;width:100%;max-height:80vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+    box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+      + '<div style="font-size:18px;font-weight:600;">🎙️ Reference Voices</div>'
+      + '<button id="ace-voice-close" style="background:#333;color:#eee;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;">Close</button>'
+      + '</div>'
+      + '<div style="font-size:12px;color:#888;margin-bottom:14px;">Pick a voice to use as Style Reference. Adds timbre/atmosphere — does NOT clone the voice.</div>'
+      + '<div id="ace-voice-status" style="font-size:13px;color:#aaa;margin-bottom:8px;min-height:18px;">&nbsp;</div>'
+      + '<div id="ace-voice-body" style="font-size:14px;color:#aaa;">Loading…</div>';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    box.querySelector('#ace-voice-close').onclick = () => overlay.remove();
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+    const body = box.querySelector('#ace-voice-body');
+    const statusEl = box.querySelector('#ace-voice-status');
+    try {
+      const res = await fetch('/api/voices/list');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (!data.voices || !data.voices.length) {
+        body.innerHTML = '<div style="color:#aaa;">No voices found in /voices/. Mount /mnt/user/appdata/chatterbox-tts/voices into the container at /app/server/public/voices.</div>';
+        return;
+      }
+      body.innerHTML = '';
+      for (const v of data.voices) {
+        const card = document.createElement('div');
+        card.style.cssText = 'background:#252525;border:1px solid #333;border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:background 0.15s;';
+        card.onmouseenter = () => card.style.background = '#2e2e2e';
+        card.onmouseleave = () => card.style.background = '#252525';
+        const safeLabel = String(v.label || '').replace(/[<>&]/g, '');
+        card.innerHTML = '<div style="flex:1;">'
+          + '<div style="color:#fff;font-weight:500;">' + safeLabel + '</div>'
+          + '<div style="color:#888;font-size:12px;">' + v.name + ' · ' + fmtSize(v.sizeBytes) + '</div>'
+          + '</div>'
+          + '<audio src="' + v.url + '" controls preload="none" style="height:32px;max-width:200px;"></audio>'
+          + '<button class="ace-voice-pick" style="background:#2563eb;color:#fff;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:13px;">Use</button>';
+        const useBtn = card.querySelector('.ace-voice-pick');
+        useBtn.onclick = async (e) => {
+          e.stopPropagation();
+          const ok = await useVoice(v, statusEl);
+          if (ok) setTimeout(() => overlay.remove(), 1200);
+        };
+        // Don't trigger pick when clicking the audio player
+        card.onclick = (e) => {
+          if (e.target.tagName === 'AUDIO' || e.target.tagName === 'BUTTON') return;
+          useBtn.click();
+        };
+        body.appendChild(card);
+      }
+    } catch (e) {
+      body.innerHTML = '<div style="color:#f88;">Failed to load voices: ' + ((e && e.message) || e) + '</div>';
+    }
+  };
+
+  const ensureFloatingButton = () => {
+    if (document.getElementById('ace-voice-fab')) return;
+    const fab = document.createElement('button');
+    fab.id = 'ace-voice-fab';
+    fab.type = 'button';
+    fab.title = 'Pick a reference voice (Style Reference timbre)';
+    fab.textContent = '🎙️ Voices';
+    fab.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9998;background:#7c3aed;color:#fff;border:none;border-radius:24px;padding:10px 16px;font-size:14px;font-weight:500;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.4);font-family:system-ui,sans-serif;';
+    fab.onclick = openModal;
+    document.body.appendChild(fab);
+  };
+
+  const init = () => {
+    ensureFloatingButton();
+    // Re-attach if React clears it on route change
+    const obs = new MutationObserver(() => ensureFloatingButton());
+    obs.observe(document.body, { childList: true });
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+
+</script>
 </body>
 </html>
