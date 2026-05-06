@@ -115,7 +115,8 @@ export const SongProfile: React.FC<SongProfileProps> = ({ songId, onBack, onPlay
                 title: response.song.title,
                 lyrics: response.song.lyrics,
                 style: response.song.style,
-                coverUrl: `https://picsum.photos/seed/${response.song.id}/400/400`,
+                // Respect backend cover_url (procedural Cubane Studio cover) before falling back to picsum.
+                coverUrl: response.song.cover_url || (response.song as any).coverUrl || `https://picsum.photos/seed/${response.song.id}/400/400`,
                 duration: response.song.duration
                     ? `${Math.floor(response.song.duration / 60)}:${String(Math.floor(response.song.duration % 60)).padStart(2, '0')}`
                     : '0:00',
