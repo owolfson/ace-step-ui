@@ -302,65 +302,106 @@ router.get('/audio', authMiddleware, async (req: AuthenticatedRequest, res: Resp
   }
 });
 
-// POST /api/training/preprocess — Spawn Python preprocessing script
+// POST /api/training/preprocess — Trigger async preprocessing on acestep-server
+//
+// Old behavior: spawned a local preprocess_dataset.py script. That assumed
+// ace-step-ui was bundled with ACE-Step source. The native architecture has
+// preprocessing inside acestep-server (port 7861) — call /v1/dataset/preprocess_async
+// which preprocesses whatever dataset is currently loaded server-side.
+//
+// Returns task_id immediately; UI should poll /api/training/preprocess-status/:taskId.
 router.post('/preprocess', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { datasetPath, outputDir } = req.body;
-    if (!datasetPath) {
-      res.status(400).json({ error: 'datasetPath is required' });
-      return;
+    const { outputDir, skipExisting } = req.body;
+    const apiUrl = config.acestep.apiUrl;
+
+    const body: Record<string, unknown> = {
+      output_dir: outputDir || './datasets/preprocessed_tensors',
+      skip_existing: !!skipExisting,
+    };
+
+    const apiRes = await fetch(`${apiUrl}/v1/dataset/preprocess_async`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!apiRes.ok) {
+      const err = await apiRes.json().catch(() => ({})) as any;
+      throw new Error(err?.detail || err?.error || `Preprocess submit failed: ${apiRes.status}`);
     }
 
-    const aceStepDir = getAceStepDir();
-    const scriptPath = path.resolve(__dirname, '../../scripts/preprocess_dataset.py');
-    const pythonPath = resolvePythonPath(aceStepDir);
-    const resolvedOutput = outputDir || path.join(config.datasets.dir, 'preprocessed_tensors');
-
-    // Ensure output dir exists
-    await mkdir(resolvedOutput, { recursive: true });
-
-    // Spawn Python process
-    const child = spawn(pythonPath, [
-      scriptPath,
-      '--dataset', datasetPath,
-      '--output', resolvedOutput,
-      '--json',
-    ], {
-      cwd: aceStepDir,
-      env: { ...process.env },
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
-    child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-
-    child.on('close', (code: number | null) => {
-      if (code === 0) {
-        // Try to parse JSON output
-        try {
-          const result = JSON.parse(stdout.trim().split('\n').pop() || '{}');
-          res.json({ status: 'Preprocessing complete', ...result });
-        } catch {
-          res.json({ status: 'Preprocessing complete', output: stdout.trim() });
-        }
-      } else {
-        res.status(500).json({
-          error: 'Preprocessing failed',
-          code,
-          stderr: stderr.trim(),
-          stdout: stdout.trim(),
-        });
-      }
-    });
-
-    child.on('error', (err: Error) => {
-      res.status(500).json({ error: `Failed to spawn process: ${err.message}` });
+    const data = await apiRes.json() as any;
+    const inner = data?.data || data;
+    res.json({
+      status: 'Preprocessing started',
+      task_id: inner.task_id,
+      total: inner.total,
+      message: inner.message,
+      poll_url: `/api/training/preprocess-status/${inner.task_id}`,
     });
   } catch (error) {
     console.error('[Training] Preprocess error:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Preprocessing failed' });
+  }
+});
+
+// GET /api/training/preprocess-status/:taskId — Poll preprocessing progress
+router.get('/preprocess-status/:taskId', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const apiUrl = config.acestep.apiUrl;
+    const apiRes = await fetch(`${apiUrl}/v1/dataset/preprocess_status/${encodeURIComponent(req.params.taskId)}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!apiRes.ok) {
+      const err = await apiRes.json().catch(() => ({})) as any;
+      throw new Error(err?.detail || err?.error || `Status query failed: ${apiRes.status}`);
+    }
+    const data = await apiRes.json() as any;
+    res.json(data?.data || data);
+  } catch (error) {
+    console.error('[Training] Preprocess status error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Status query failed' });
+  }
+});
+
+// GET /api/training/auto-label-status/:taskId — Poll auto-labeling progress
+// (companion to /auto-label which kicks off async)
+router.get('/auto-label-status/:taskId', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const apiUrl = config.acestep.apiUrl;
+    const apiRes = await fetch(`${apiUrl}/v1/dataset/auto_label_status/${encodeURIComponent(req.params.taskId)}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!apiRes.ok) {
+      const err = await apiRes.json().catch(() => ({})) as any;
+      throw new Error(err?.detail || err?.error || `Status query failed: ${apiRes.status}`);
+    }
+    const data = await apiRes.json() as any;
+    res.json(data?.data || data);
+  } catch (error) {
+    console.error('[Training] Auto-label status error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Status query failed' });
+  }
+});
+
+// GET /api/training/training-status — Poll active training run progress
+router.get('/training-status', authMiddleware, async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const apiUrl = config.acestep.apiUrl;
+    const apiRes = await fetch(`${apiUrl}/v1/training/status`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!apiRes.ok) {
+      const err = await apiRes.json().catch(() => ({})) as any;
+      throw new Error(err?.detail || err?.error || `Status query failed: ${apiRes.status}`);
+    }
+    const data = await apiRes.json() as any;
+    res.json(data?.data || data);
+  } catch (error) {
+    console.error('[Training] Training status error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Status query failed' });
   }
 });
 
