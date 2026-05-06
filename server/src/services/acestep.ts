@@ -161,8 +161,11 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
     params.keyScale || '',                                                             //  3: KeyScale
     params.timeSignature || '',                                                        //  4: Time Signature
     params.vocalLanguage || 'en',                                                      //  5: Vocal Language
-    params.inferenceSteps ?? 8,                                                        //  6: DiT Inference Steps
-    params.guidanceScale ?? 7.0,                                                       //  7: DiT Guidance Scale
+    // Model-aware defaults: XL needs 50 steps for full quality; turbo is tuned to 8.
+    // Auto-detect from ACESTEP_ACTIVE_MODEL env (set by docker-compose to match the
+    // currently-loaded acestep-server checkpoint).
+    params.inferenceSteps ?? (process.env.ACESTEP_ACTIVE_MODEL?.includes('xl') ? 50 : 8),
+    params.guidanceScale ?? (process.env.ACESTEP_ACTIVE_MODEL?.match(/xl-(sft|base)/) ? 7.3 : 7.0),
     params.randomSeed !== false,                                                       //  8: Random Seed
     String(params.seed ?? -1),                                                         //  9: Seed
     referenceAudio,                                                                    // 10: Reference Audio
@@ -176,10 +179,14 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
     params.audioCoverStrength ?? 1.0,                                                  // 18: Audio Cover Strength
     0.0,                                                                               // 19: Cover Noise Strength
     (params.taskType === 'audio2audio' ? 'cover' : params.taskType) || 'text2music',  // 20: Task Type
-    params.useAdg ?? false,                                                            // 21: Use ADG
+    // ADG, cfg_interval_end, and shift are model-aware (per
+    // feedback_acestep_vocal_vs_cinematic_recipe.md memory):
+    //   xl-base (cinematic):  shift=5.0, cfg_interval_end=0.7
+    //   xl-sft / turbo (vocal): shift=3.0, cfg_interval_end=1.0
+    params.useAdg ?? Boolean(process.env.ACESTEP_ACTIVE_MODEL?.match(/xl-(sft|base)/)),  // 21: Use ADG (XL only)
     params.cfgIntervalStart ?? 0.0,                                                    // 22: CFG Interval Start
-    params.cfgIntervalEnd ?? 1.0,                                                      // 23: CFG Interval End
-    params.shift ?? 3.0,                                                               // 24: Shift
+    params.cfgIntervalEnd ?? (process.env.ACESTEP_ACTIVE_MODEL === 'acestep-v15-xl-base' ? 0.7 : 1.0),
+    params.shift ?? (process.env.ACESTEP_ACTIVE_MODEL === 'acestep-v15-xl-base' ? 5.0 : 3.0),
     params.inferMethod || 'ode',                                                       // 25: Inference Method (ode|sde)
     (['euler', 'heun'].includes(params.samplerMode!) ? params.samplerMode : 'euler'),  // 26: Sampler Mode (ACE-Step 1.5)
     params.velocityNormThreshold ?? 3.0,                                               // 27: Velocity Norm Threshold (ACE-Step 1.5)

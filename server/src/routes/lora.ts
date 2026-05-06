@@ -93,6 +93,38 @@ router.post('/toggle', authMiddleware, async (req: AuthenticatedRequest, res: Re
 
 // GET /api/lora/status — Get current LoRA state
 router.get('/status', authMiddleware, async (_req: AuthenticatedRequest, res: Response) => {
+  // Query the native acestep-server for ground truth — local loraState can
+  // drift if the server resets (e.g. container restart, /v1/init swap, or a
+  // /v1/lora/load failure UI didn't observe). Server's /v1/lora/status is the
+  // canonical source.
+  try {
+    const acestepUrl = (process.env.ACESTEP_API_URL || 'http://host.docker.internal:7861').replace(/\/+$/, '');
+    const r = await fetch(acestepUrl + '/v1/lora/status', { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      const raw: any = await r.json();
+      const d: any = raw.data || raw;
+      // Adapt to UI shape (loraState) while exposing extras for multi-LoRA UI later
+      const adapters: string[] = d.adapters || [];
+      const activeAdapter = d.active_adapter || (adapters.length > 0 ? adapters[0] : '');
+      const merged = {
+        loaded: !!d.lora_loaded,
+        active: !!d.use_lora,
+        scale: typeof d.lora_scale === 'number' ? d.lora_scale : 1.0,
+        path: loraState.path,           // keep last-known UI-side path (server doesn't return path)
+        adapters,                        // extras: list of all loaded adapters
+        active_adapter: activeAdapter,
+        scales: d.scales || {},
+      };
+      // Reconcile local cache so future writes start from truth
+      loraState.loaded = merged.loaded;
+      loraState.active = merged.active;
+      loraState.scale = merged.scale;
+      res.json(merged);
+      return;
+    }
+  } catch (e: any) {
+    console.warn('[lora/status] server query failed, falling back to local cache:', e?.message);
+  }
   res.json(loraState);
 });
 

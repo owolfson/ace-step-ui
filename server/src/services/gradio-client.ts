@@ -47,6 +47,21 @@ class NativeAceStepClient {
     return r.json();
   }
 
+  private async _request(method: string, path: string, body: any, timeoutMs: number = 30_000): Promise<any> {
+    const init: any = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs),
+    };
+    if (body !== undefined && body !== null) init.body = JSON.stringify(body);
+    const r = await fetch(this.baseUrl + path, init);
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error('[native-client] ' + method + ' ' + path + ' HTTP ' + r.status + ': ' + text.slice(0, 200));
+    }
+    return r.json();
+  }
+
   /**
    * Translate /generation_wrapper's 50 positional args into a GenerateMusicRequest body.
    * Field names verified against acestep/api/http/release_task_models.py.
@@ -239,8 +254,21 @@ class NativeAceStepClient {
 
         const reqBody: any = { lora_path: _loraPath };
         if (args[1]) reqBody.adapter_name = args[1];
-        const result = await this._post('/v1/lora/load', reqBody, 30_000);
-        return { data: [result.data?.message || result.message || 'loaded'] };
+        try {
+          const result = await this._post('/v1/lora/load', reqBody, 30_000);
+          return { data: [result.data?.message || result.message || 'loaded'] };
+        } catch (e: any) {
+          // Idempotency: server returns 400 "Adapter name already in use" when
+          // an adapter with the same name is already registered (e.g. previous
+          // load attempt succeeded server-side, UI state is stale). Treat as
+          // success — the adapter IS loaded, which is the user's intent.
+          const msg = String(e?.message || '');
+          if (msg.includes('already in use') || msg.includes('already loaded')) {
+            console.log('[load_lora] adapter already loaded — treating as success');
+            return { data: ['LoRA already loaded (idempotent)'] };
+          }
+          throw e;
+        }
       }
 
       case '/unload_lora': {
@@ -283,6 +311,165 @@ class NativeAceStepClient {
         // Training-flow endpoint. Path on native API is unverified — best-guess.
         const result = await this._post('/v1/training/load-dataset', { dataset_path: args[0] }, 60_000);
         return { data: [result.data || result] };
+      }
+
+      // ── Training tab: load dataset manifest (.json) by path ────────────────
+      case '/load_training_dataset': {
+        // args[0] = dataset_path or tensor_dir
+        const result = await this._post('/v1/dataset/load', { dataset_path: args[0] }, 60_000);
+        const status = result.data?.message || result.message || 'loaded';
+        return { data: [status] };
+      }
+
+      // ── Training tab: get one sample for preview/edit ──────────────────────
+      case '/get_sample_preview': {
+        // args[0] = sample idx
+        const idx = Number(args[0]) || 0;
+        const result = await this._get('/v1/dataset/sample/' + idx, 30_000);
+        const s: any = result.data || result;
+        // training.ts expects: [audio, filename, caption, genre, promptOverride,
+        // lyrics, bpm, key, timesig, duration, language, instrumental, rawLyrics]
+        return {
+          data: [
+            s.audio_path || s.audio || '',
+            s.filename || '',
+            s.caption || '',
+            s.genre || '',
+            s.prompt_override || 'Use Global Ratio',
+            s.lyrics || '',
+            s.bpm || 120,
+            s.keyscale || s.key_scale || s.key || '',
+            s.timesignature || s.time_signature || '',
+            s.duration || 0,
+            s.language || 'unknown',
+            !!s.is_instrumental,
+            s.raw_lyrics || s.lyrics || '',
+          ],
+        };
+      }
+
+      // ── Training tab: persist a sample edit ────────────────────────────────
+      case '/save_sample_edit': {
+        // args[0..9] = sampleIdx, caption, genre, promptOverride, lyrics, bpm,
+        //              key, timeSignature, language, instrumental
+        const idx = Number(args[0]) || 0;
+        const body = {
+          sample_idx: idx,
+          caption: args[1] || '',
+          genre: args[2] || '',
+          prompt_override: args[3] || 'Use Global Ratio',
+          lyrics: args[4] || '',
+          bpm: Number(args[5]) || 120,
+          keyscale: args[6] || '',
+          timesignature: args[7] || '',
+          language: args[8] || 'instrumental',
+          is_instrumental: !!args[9],
+        };
+        // PUT /v1/dataset/sample/{idx}
+        const result = await this._request('PUT', '/v1/dataset/sample/' + idx, body, 30_000);
+        const status = result.data?.message || result.message || 'saved';
+        // training.ts expects: [dataframe, editStatus]
+        return { data: [null, status] };
+      }
+
+      // ── Training tab: kick off LoRA training ───────────────────────────────
+      case '/training_wrapper': {
+        // 13 positional args mapping to StartTrainingRequest:
+        //   0  tensorDir
+        //   1  rank        → lora_rank
+        //   2  alpha       → lora_alpha
+        //   3  dropout     → lora_dropout
+        //   4  learningRate
+        //   5  epochs      → train_epochs
+        //   6  batchSize   → train_batch_size
+        //   7  gradientAccumulation
+        //   8  saveEvery   → save_every_n_epochs
+        //   9  shift       → training_shift
+        //   10 seed        → training_seed
+        //   11 outputDir   → lora_output_dir
+        //   12 resumeCheckpoint  (NOT in StartTrainingRequest schema; ignored)
+        const body: any = {
+          tensor_dir: args[0] || '',
+          lora_rank: Number(args[1]) || 64,
+          lora_alpha: Number(args[2]) || 128,
+          lora_dropout: Number(args[3]) ?? 0.1,
+          learning_rate: Number(args[4]) || 0.0001,
+          train_epochs: Number(args[5]) || 10,
+          train_batch_size: Number(args[6]) || 1,
+          gradient_accumulation: Number(args[7]) || 4,
+          save_every_n_epochs: Number(args[8]) || 5,
+          training_shift: Number(args[9]) ?? 3.0,
+          training_seed: Number(args[10]) ?? 42,
+          lora_output_dir: args[11] || './lora_output',
+        };
+        const result = await this._post('/v1/training/start', body, 60_000);
+        const d: any = result.data || result;
+        // training.ts expects: [trainingProgress, trainingLog, lineplotData]
+        return {
+          data: [
+            d.message || d.task_id || 'training started',
+            d.log || '',
+            d.metrics || null,
+          ],
+        };
+      }
+
+      // ── Training tab: stop in-flight training ──────────────────────────────
+      case '/stop_training': {
+        const result = await this._post('/v1/training/stop', {}, 15_000);
+        const status = result.data?.message || result.message || 'stopped';
+        return { data: [status] };
+      }
+
+      // ── Training tab: auto-label entire dataset ────────────────────────────
+      case '/auto_label_all': {
+        // args: [skipMetas, formatLyrics, transcribeLyrics, onlyUnlabeled]
+        const body: any = {
+          skip_metas: !!args[0],
+          format_lyrics: !!args[1],
+          transcribe_lyrics: !!args[2],
+          only_unlabeled: !!args[3],
+          batch_size: 1,
+        };
+        const result = await this._post('/v1/dataset/auto_label_async', body, 60_000);
+        const d: any = result.data || result;
+        // training.ts expects: [dataframe, status]
+        return { data: [null, d.message || ('task_id: ' + (d.task_id || '?'))] };
+      }
+
+      // ── Training tab: initialize ACE-Step service for training session ─────
+      case '/init_service_wrapper': {
+        // args: [checkpoint, configPath, device, initLlm, lmModelPath, backend,
+        //        useFlashAttention, offloadToCpu, ...]
+        const body: any = {
+          model: args[1] || args[0] || 'acestep-v15-xl-sft',
+          init_llm: !!args[3],
+        };
+        if (args[4]) body.lm_model_path = args[4];
+        const result = await this._post('/v1/init', body, 600_000);
+        const status = result.data?.message || result.message || 'initialized';
+        return { data: [status] };
+      }
+
+      // ── Training tab: export trained LoRA to safetensors ───────────────────
+      case '/export_lora': {
+        // args: [exportPath, loraOutputDir]
+        const body: any = {
+          export_path: args[0] || './lora_output/final_lora',
+          lora_output_dir: args[1] || './lora_output',
+        };
+        const result = await this._post('/v1/training/export', body, 60_000);
+        const status = result.data?.message || result.message || 'exported';
+        return { data: [status] };
+      }
+
+      // ── Training tab: import a previously-saved dataset (JSON manifest) ────
+      case '/import_dataset': {
+        // args: [datasetType, datasetPath]
+        // Native server uses /v1/dataset/load for JSON imports
+        const result = await this._post('/v1/dataset/load', { dataset_path: args[1] || args[0] }, 60_000);
+        const status = result.data?.message || result.message || 'imported';
+        return { data: [status] };
       }
 
       default:
