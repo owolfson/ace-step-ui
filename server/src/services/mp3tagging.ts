@@ -50,7 +50,7 @@ export async function tagMp3(song: SongRecord): Promise<boolean> {
     // Brand defaults — override per-deployment with MP3_TAG_ARTIST / MP3_TAG_ALBUM
     // env vars in docker-compose.yml.
     artist: process.env.MP3_TAG_ARTIST || 'Cubane Studio',
-    album: process.env.MP3_TAG_ALBUM || 'Cubane Studio',
+    album: process.env.MP3_TAG_ALBUM || 'Infamous Media Productions',
     year: String(new Date().getFullYear()),
     genre: extractGenre(song.caption || song.style),
     comment: { language: 'eng', text: song.caption || song.style || '' },
