@@ -7,7 +7,20 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import { fileURLToPath } from 'url';
 import { Resvg } from '@resvg/resvg-js';
+
+// Locate the bundled Brosnoirs font. Resolved at module load so we don't pay
+// the lookup cost per render.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// Compiled location: /app/server/dist/services/album-cover.js
+// Font is shipped at /app/server/branding/fonts/Brosnoirs.ttf (see Dockerfile)
+const FONT_PATH = path.resolve(__dirname, '../../branding/fonts/Brosnoirs.ttf');
+const FONT_AVAILABLE = fs.existsSync(FONT_PATH);
+if (!FONT_AVAILABLE) {
+  console.warn('[album-cover] Brosnoirs.ttf not found at', FONT_PATH, '— covers will render with system fallback (or empty if Alpine).');
+}
 
 // Curated music-themed palettes — each [bg, primary, secondary, accent]
 // Picked deterministically by hashing the song title so the same song always
@@ -91,12 +104,13 @@ function buildSvg(opts: {
     lines.push(titleWords.slice(t, t * 2).join(' ').toUpperCase());
     lines.push(titleWords.slice(t * 2).join(' ').toUpperCase());
   }
-  // Font size: bigger when fewer lines + shorter
+  // Font size: bigger = more impact (Owen wants BOLD)
   const longestLine = Math.max(...lines.map(l => l.length));
   const baseFontSize =
-    longestLine <= 6 ? Math.floor(size * 0.18) :
-    longestLine <= 12 ? Math.floor(size * 0.13) :
-    Math.floor(size * 0.09);
+    longestLine <= 5 ? Math.floor(size * 0.32) :
+    longestLine <= 9 ? Math.floor(size * 0.22) :
+    longestLine <= 14 ? Math.floor(size * 0.15) :
+    Math.floor(size * 0.10);
 
   // Decorative motifs (style-aware)
   let motifSvg = '';
@@ -140,23 +154,51 @@ function buildSvg(opts: {
     }
   }
 
-  // Title text rendering
-  const titleY = size * 0.55;
-  const lineGap = baseFontSize * 1.1;
+  // Title text rendering — Brosnoirs (graffiti / dancehall display) with
+  // dark stroke for high-contrast pop against any palette
+  const titleY = size * 0.5;
+  const lineGap = baseFontSize * 0.95;
   const titleSvg = lines.map((line, i) => {
     const y = titleY + (i - (lines.length - 1) / 2) * lineGap;
     return `<text x="${size / 2}" y="${y}" text-anchor="middle" dominant-baseline="middle"
-              font-family="Arial Black, Helvetica, sans-serif" font-weight="900"
+              font-family="Brosnoirs, sans-serif"
               font-size="${baseFontSize}" fill="${c3}"
-              letter-spacing="2">${escapeXml(line)}</text>`;
+              stroke="${bg}" stroke-width="3" paint-order="stroke">${escapeXml(line)}</text>`;
   }).join('');
 
-  // Bottom imprint: artist/label brand line
-  const imprintSize = Math.floor(size * 0.025);
-  const imprint = `<text x="${size / 2}" y="${size - size * 0.04}" text-anchor="middle"
-                     font-family="Helvetica, sans-serif" font-weight="500"
-                     font-size="${imprintSize}" fill="${c1}" fill-opacity="0.7"
-                     letter-spacing="3">CUBANE STUDIO</text>`;
+  // ── Infamous Media Productions clapboard logo (lower-right corner) ──
+  // Reggae color scheme matches the original Wolfson Media Group logo Owen sent.
+  // Placed in a 200×200 viewBox group, then scaled to 22% of cover side.
+  const LOGO_VBOX = 200;
+  const LOGO_SIZE = size * 0.22;
+  const LOGO_X = size - LOGO_SIZE - size * 0.04;
+  const LOGO_Y = size - LOGO_SIZE - size * 0.04;
+  const REGGAE_GREEN = '#1F8B3B';
+  const REGGAE_RED   = '#C8242C';
+  const REGGAE_GOLD  = '#F2D71A';
+  const logoSvg = `
+    <g transform="translate(${LOGO_X} ${LOGO_Y}) scale(${LOGO_SIZE / LOGO_VBOX})">
+      <!-- Slate body -->
+      <rect x="10" y="50" width="180" height="140" fill="#0A0A0A" stroke="${REGGAE_GOLD}" stroke-width="2"/>
+      <!-- Clapboard top piece (angled, hinged on left) -->
+      <g transform="rotate(-6 25 35)">
+        <rect x="10" y="22" width="180" height="32" fill="#0A0A0A"/>
+        <polygon points="22,22 44,22 36,54 14,54" fill="#FFFFFF"/>
+        <polygon points="64,22 86,22 78,54 56,54" fill="#FFFFFF"/>
+        <polygon points="106,22 128,22 120,54 98,54" fill="#FFFFFF"/>
+        <polygon points="148,22 170,22 162,54 140,54" fill="#FFFFFF"/>
+        <circle cx="20" cy="30" r="3" fill="#FFFFFF"/>
+        <circle cx="20" cy="44" r="3" fill="#FFFFFF"/>
+      </g>
+      <!-- Three text lines: INFAMOUS / MEDIA / PRODUCTIONS in reggae colors -->
+      <text x="100" y="92" text-anchor="middle" font-family="Brosnoirs, sans-serif"
+            font-size="38" fill="${REGGAE_GREEN}" stroke="black" stroke-width="1.5" paint-order="stroke">INFAMOUS</text>
+      <text x="100" y="135" text-anchor="middle" font-family="Brosnoirs, sans-serif"
+            font-size="42" fill="${REGGAE_RED}" stroke="black" stroke-width="1.5" paint-order="stroke">MEDIA</text>
+      <text x="100" y="180" text-anchor="middle" font-family="Brosnoirs, sans-serif"
+            font-size="34" fill="${REGGAE_GOLD}" stroke="black" stroke-width="1.5" paint-order="stroke">PRODUCTIONS</text>
+    </g>
+  `;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
     <defs>
@@ -166,15 +208,15 @@ function buildSvg(opts: {
         <stop offset="100%" stop-color="${bg}"/>
       </linearGradient>
       <radialGradient id="vignette" cx="0.5" cy="0.5" r="0.7">
-        <stop offset="60%" stop-color="black" stop-opacity="0"/>
-        <stop offset="100%" stop-color="black" stop-opacity="0.5"/>
+        <stop offset="55%" stop-color="black" stop-opacity="0"/>
+        <stop offset="100%" stop-color="black" stop-opacity="0.6"/>
       </radialGradient>
     </defs>
     <rect width="${size}" height="${size}" fill="url(#bg)"/>
     ${motifSvg}
     <rect width="${size}" height="${size}" fill="url(#vignette)"/>
     ${titleSvg}
-    ${imprint}
+    ${logoSvg}
   </svg>`;
 }
 
@@ -190,6 +232,11 @@ export function generateAlbumCoverBuffer(opts: {
   const resvg = new Resvg(svg, {
     background: '#000000',
     fitTo: { mode: 'width', value: size },
+    font: FONT_AVAILABLE ? {
+      fontFiles: [FONT_PATH],
+      loadSystemFonts: false,
+      defaultFontFamily: 'Brosnoirs',
+    } : { loadSystemFonts: true },
   });
   return resvg.render().asPng();
 }
