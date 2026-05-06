@@ -242,19 +242,10 @@ export function generateAlbumCoverBuffer(opts: {
   return resvg.render().asPng();
 }
 
-/** Fetch a Lorem Picsum stock photo seeded by song ID — gives every song
- *  a unique atmospheric cover with a "lofi indie album art" vibe. Branding
- *  lives in ID3 tags (Cubane Studio / Infamous Media Productions), not on
- *  the photo itself. Falls back to the procedural cover on network failure. */
-export async function fetchPicsumCoverBuffer(opts: {
-  seed: string;
-  title: string;
-  style?: string;
-  size?: number;
-}): Promise<Buffer> {
-  const size = opts.size || 1024;
-  const seed = encodeURIComponent(opts.seed || opts.title);
-  const url = `https://picsum.photos/seed/${seed}/${size}/${size}`;
+/** Fetch a Lorem Picsum stock photo seeded by song ID. Returns the raw image
+ *  buffer (typically JPEG). Used as the base layer for composite covers. */
+async function fetchPicsumRaw(seed: string, size: number): Promise<Buffer | null> {
+  const url = `https://picsum.photos/seed/${encodeURIComponent(seed)}/${size}/${size}`;
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(15_000), redirect: 'follow' });
     if (!r.ok) throw new Error(`picsum HTTP ${r.status}`);
@@ -262,27 +253,117 @@ export async function fetchPicsumCoverBuffer(opts: {
     if (buf.length < 5_000) throw new Error('picsum returned tiny payload');
     return buf;
   } catch (e: any) {
-    console.warn('[album-cover] picsum fetch failed, falling back to procedural:', e?.message);
-    return generateAlbumCoverBuffer({ title: opts.title, style: opts.style, seed: opts.seed, size });
+    console.warn('[album-cover] picsum fetch failed:', e?.message);
+    return null;
   }
 }
 
-/** Detect MIME type from the first bytes of an image buffer. */
-function detectImageExt(buf: Buffer): 'jpg' | 'png' {
-  // JPEG: FF D8 FF
-  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
-  // PNG: 89 50 4E 47
-  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50) return 'png';
-  return 'jpg';  // picsum default
+/** Build a composite-cover SVG: picsum photo as base layer, vignette for
+ *  text contrast, big Brosnoirs title, Infamous Media clapboard logo in
+ *  the lower-right corner. */
+function buildCompositeSvg(opts: {
+  title: string;
+  style?: string;
+  seed: string;
+  size: number;
+  photoDataUrl: string;
+}): string {
+  const { title, style, seed, size, photoDataUrl } = opts;
+  const rng = new SeededRandom(hashString(seed || title));
+
+  // Title text — same logic as procedural cover (multi-line + auto-size)
+  const safeTitle = (title || 'Untitled').slice(0, 32);
+  const titleWords = safeTitle.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  if (titleWords.length <= 2) {
+    lines.push(safeTitle.toUpperCase());
+  } else if (titleWords.length <= 4) {
+    const mid = Math.ceil(titleWords.length / 2);
+    lines.push(titleWords.slice(0, mid).join(' ').toUpperCase());
+    lines.push(titleWords.slice(mid).join(' ').toUpperCase());
+  } else {
+    const t = Math.ceil(titleWords.length / 3);
+    lines.push(titleWords.slice(0, t).join(' ').toUpperCase());
+    lines.push(titleWords.slice(t, t * 2).join(' ').toUpperCase());
+    lines.push(titleWords.slice(t * 2).join(' ').toUpperCase());
+  }
+  const longestLine = Math.max(...lines.map(l => l.length));
+  const baseFontSize =
+    longestLine <= 5 ? Math.floor(size * 0.30) :
+    longestLine <= 9 ? Math.floor(size * 0.20) :
+    longestLine <= 14 ? Math.floor(size * 0.14) :
+    Math.floor(size * 0.10);
+
+  const titleY = size * 0.5;
+  const lineGap = baseFontSize * 0.95;
+  // White fill + black stroke = max readability against any photo
+  const titleSvg = lines.map((line, i) => {
+    const y = titleY + (i - (lines.length - 1) / 2) * lineGap;
+    return `<text x="${size / 2}" y="${y}" text-anchor="middle" dominant-baseline="middle"
+              font-family="Brosnoirs, sans-serif"
+              font-size="${baseFontSize}" fill="#FFFFFF"
+              stroke="#000000" stroke-width="4" paint-order="stroke">${escapeXml(line)}</text>`;
+  }).join('');
+
+  // Infamous Media Productions clapboard logo in lower-right corner
+  const LOGO_VBOX = 200;
+  const LOGO_SIZE = size * 0.22;
+  const LOGO_X = size - LOGO_SIZE - size * 0.04;
+  const LOGO_Y = size - LOGO_SIZE - size * 0.04;
+  const REGGAE_GREEN = '#1F8B3B';
+  const REGGAE_RED   = '#C8242C';
+  const REGGAE_GOLD  = '#F2D71A';
+  const logoSvg = `
+    <g transform="translate(${LOGO_X} ${LOGO_Y}) scale(${LOGO_SIZE / LOGO_VBOX})">
+      <rect x="10" y="50" width="180" height="140" fill="#0A0A0A" stroke="${REGGAE_GOLD}" stroke-width="2"/>
+      <g transform="rotate(-6 25 35)">
+        <rect x="10" y="22" width="180" height="32" fill="#0A0A0A"/>
+        <polygon points="22,22 44,22 36,54 14,54" fill="#FFFFFF"/>
+        <polygon points="64,22 86,22 78,54 56,54" fill="#FFFFFF"/>
+        <polygon points="106,22 128,22 120,54 98,54" fill="#FFFFFF"/>
+        <polygon points="148,22 170,22 162,54 140,54" fill="#FFFFFF"/>
+        <circle cx="20" cy="30" r="3" fill="#FFFFFF"/>
+        <circle cx="20" cy="44" r="3" fill="#FFFFFF"/>
+      </g>
+      <text x="100" y="92" text-anchor="middle" font-family="Brosnoirs, sans-serif"
+            font-size="38" fill="${REGGAE_GREEN}" stroke="black" stroke-width="1.5" paint-order="stroke">INFAMOUS</text>
+      <text x="100" y="135" text-anchor="middle" font-family="Brosnoirs, sans-serif"
+            font-size="42" fill="${REGGAE_RED}" stroke="black" stroke-width="1.5" paint-order="stroke">MEDIA</text>
+      <text x="100" y="180" text-anchor="middle" font-family="Brosnoirs, sans-serif"
+            font-size="34" fill="${REGGAE_GOLD}" stroke="black" stroke-width="1.5" paint-order="stroke">PRODUCTIONS</text>
+    </g>
+  `;
+  // Suppress unused-var warning for rng/style (kept for future motif use)
+  void rng; void style;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+    <defs>
+      <linearGradient id="titleVignette" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="black" stop-opacity="0.2"/>
+        <stop offset="40%" stop-color="black" stop-opacity="0.55"/>
+        <stop offset="60%" stop-color="black" stop-opacity="0.55"/>
+        <stop offset="100%" stop-color="black" stop-opacity="0.2"/>
+      </linearGradient>
+    </defs>
+    <!-- Picsum photo as base layer -->
+    <image href="${photoDataUrl}" x="0" y="0" width="${size}" height="${size}" preserveAspectRatio="xMidYMid slice"/>
+    <!-- Horizontal vignette band behind the title for readability -->
+    <rect x="0" y="${size * 0.3}" width="${size}" height="${size * 0.4}" fill="url(#titleVignette)"/>
+    ${titleSvg}
+    ${logoSvg}
+  </svg>`;
 }
 
-/** Generate an album cover, save to public/audio/<userId>/<songId>-cover.<ext>,
+/** Generate an album cover, save to public/audio/<userId>/<songId>-cover.png,
  *  return the /audio/... URL suitable for `cover_url` field.
  *
- *  Strategy: fetch a Lorem Picsum stock photo seeded by song ID (gives the
- *  "lofi indie album art" aesthetic Owen prefers — atmospheric photos, no
- *  AI-generated look, branding in ID3 tags). Falls back to procedural
- *  gradient + title + clapboard logo if picsum is unreachable. */
+ *  Strategy: fetch a Lorem Picsum stock photo seeded by song ID, then
+ *  composite the song title (Brosnoirs font) and Infamous Media Productions
+ *  clapboard logo on top. Photo + text + logo = "indie label release"
+ *  aesthetic (atmospheric image with bold typography overlay).
+ *
+ *  Falls back to pure procedural cover (gradient + title + logo, no photo)
+ *  if picsum is unreachable. */
 export async function ensureAlbumCover(opts: {
   userId: string;
   songId: string;
@@ -294,30 +375,55 @@ export async function ensureAlbumCover(opts: {
   const userDir = path.join(opts.publicAudioDir, opts.userId);
   await fs.promises.mkdir(userDir, { recursive: true });
 
-  // Check for any existing cover in either extension (jpg or png) before regenerating
-  if (!opts.force) {
+  const filename = `${opts.songId}-cover.png`;
+  const fullPath = path.join(userDir, filename);
+
+  // Clean up any previous-format covers (jpg from earlier picsum-only attempt)
+  if (opts.force || !fs.existsSync(fullPath)) {
     for (const ext of ['jpg', 'png']) {
-      const candidate = path.join(userDir, `${opts.songId}-cover.${ext}`);
-      if (fs.existsSync(candidate)) {
-        return `/audio/${opts.userId}/${opts.songId}-cover.${ext}`;
+      const old = path.join(userDir, `${opts.songId}-cover.${ext}`);
+      if (fs.existsSync(old) && (opts.force || ext === 'jpg')) {
+        await fs.promises.unlink(old).catch(() => {});
       }
     }
   } else {
-    // Force regen: clean up old extensions so we don't leave orphans
-    for (const ext of ['jpg', 'png']) {
-      const old = path.join(userDir, `${opts.songId}-cover.${ext}`);
-      if (fs.existsSync(old)) await fs.promises.unlink(old).catch(() => {});
-    }
+    return `/audio/${opts.userId}/${filename}`;
   }
 
-  const buf = await fetchPicsumCoverBuffer({
-    seed: opts.songId,
-    title: opts.title,
-    style: opts.style,
-  });
-  const ext = detectImageExt(buf);
-  const filename = `${opts.songId}-cover.${ext}`;
-  const fullPath = path.join(userDir, filename);
-  await fs.promises.writeFile(fullPath, buf);
+  const size = 1024;
+  const photoBuf = await fetchPicsumRaw(opts.songId, size);
+
+  let pngBuf: Buffer;
+  if (photoBuf) {
+    // Composite: photo + title + logo
+    const photoDataUrl = `data:image/jpeg;base64,${photoBuf.toString('base64')}`;
+    const svg = buildCompositeSvg({
+      title: opts.title,
+      style: opts.style,
+      seed: opts.songId,
+      size,
+      photoDataUrl,
+    });
+    const resvg = new Resvg(svg, {
+      background: '#000000',
+      fitTo: { mode: 'width', value: size },
+      font: FONT_AVAILABLE ? {
+        fontFiles: [FONT_PATH],
+        loadSystemFonts: false,
+        defaultFontFamily: 'Brosnoirs',
+      } : { loadSystemFonts: true },
+    });
+    pngBuf = resvg.render().asPng();
+  } else {
+    // Fallback: pure procedural (no photo)
+    pngBuf = generateAlbumCoverBuffer({
+      title: opts.title,
+      style: opts.style,
+      seed: opts.songId,
+      size,
+    });
+  }
+
+  await fs.promises.writeFile(fullPath, pngBuf);
   return `/audio/${opts.userId}/${filename}`;
 }
