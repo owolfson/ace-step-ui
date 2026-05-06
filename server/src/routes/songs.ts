@@ -591,35 +591,70 @@ router.post('/:id/like', authMiddleware, async (req: AuthenticatedRequest, res: 
 });
 
 // Get liked songs
-// POST /api/songs/retag-all — Backfill ID3 tags on all songs the user owns.
-// Useful one-shot for songs generated before mp3tagging.ts existed (pre-2026-05-05)
-// or for a brand rename (e.g. switching album from "ACE-Step Studio" to "Cubane Studio").
+// POST /api/songs/retag-all — Backfill ID3 tags + procedural album covers
+// on all songs the user owns. Useful one-shot for legacy songs that predate
+// mp3tagging.ts or album-cover.ts, OR after a brand rename.
+//
+// Optional body: { force_cover: true } to regenerate covers even if they exist.
 router.post('/retag-all', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const force_cover = !!(req.body && (req.body as any).force_cover);
+
     const result = await pool.query(
       `SELECT id, title, lyrics, style, caption, cover_url, audio_url,
               duration, bpm, key_scale
        FROM songs WHERE user_id = $1`,
       [req.user!.id]
     );
+
+    // Resolve PUBLIC_AUDIO_DIR (mirrors mp3tagging.ts logic)
+    const _path = await import('path');
+    const _url = await import('url');
+    const _fname = _url.fileURLToPath(import.meta.url);
+    const _dir = _path.dirname(_fname);
+    const PUBLIC_AUDIO_DIR = _path.resolve(_dir, '../../public/audio');
+    const { ensureAlbumCover } = await import('../services/album-cover.js');
+
     let tagged = 0;
     let skipped = 0;
+    let covered = 0;
     for (const song of result.rows) {
+      // Cover step first (so tagMp3 picks up the freshly-saved cover_url)
+      try {
+        const coverUrl = await ensureAlbumCover({
+          userId: req.user!.id,
+          songId: song.id,
+          title: song.title || 'Untitled',
+          style: song.style || song.caption,
+          publicAudioDir: PUBLIC_AUDIO_DIR,
+          force: force_cover,
+        });
+        if (coverUrl !== song.cover_url) {
+          await pool.query('UPDATE songs SET cover_url = ? WHERE id = ?', [coverUrl, song.id]);
+          song.cover_url = coverUrl;
+        }
+        covered++;
+      } catch (e: any) {
+        console.warn('[retag-all] cover error', song.id, e?.message);
+      }
+      // Tag step
       try {
         const ok = await tagMp3(song);
         if (ok) tagged++; else skipped++;
       } catch (e: any) {
-        console.warn('[retag-all] error on', song.id, e.message);
+        console.warn('[retag-all] tag error', song.id, e?.message);
         skipped++;
       }
     }
     res.json({
       total: result.rows.length,
       tagged,
+      covered,
       skipped,
+      force_cover,
       brand: {
-        artist: process.env.MP3_TAG_ARTIST || 'Owen',
-        album: process.env.MP3_TAG_ALBUM || 'ACE-Step Studio',
+        artist: process.env.MP3_TAG_ARTIST || 'Cubane Studio',
+        album: process.env.MP3_TAG_ALBUM || 'Infamous Media Productions',
       },
     });
   } catch (error) {

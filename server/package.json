@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@gradio/client": "^2.0.4",
+    "@resvg/resvg-js": "^2.6.2",
     "@types/multer": "^2.0.0",
     "better-sqlite3": "^11.0.0",
     "cors": "^2.8.5",
@@ -20,8 +21,8 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
-    "uuid": "^9.0.1",
-    "node-id3": "^0.2.6"
+    "node-id3": "^0.2.6",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.8",

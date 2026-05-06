@@ -456,18 +456,42 @@ router.get('/status/:jobId', authMiddleware, async (req: AuthenticatedRequest, r
                 );
 
                 localPaths.push(storedPath);
-                                // MP3-TAG-HOOK-GENERATE: auto-tag freshly-saved mp3 (fire-and-forget)
-                                _tagMp3({
-                                  id: songId,
-                                  title: songTitle,
-                                  lyrics: params.instrumental ? '[Instrumental]' : params.lyrics,
-                                  style: params.style,
-                                  caption: params.style,
-                                  audio_url: storedPath,
-                                  bpm: aceStatus.result.bpm || params.bpm,
-                                  key_scale: aceStatus.result.keyScale || params.keyScale,
-                                  duration: aceStatus.result.duration || params.duration,
-                                }).catch((e: any) => console.warn('[mp3tag]', e.message));
+                                // ALBUM-COVER + MP3-TAG-HOOK-GENERATE: generate procedural cover then tag.
+                                // Sequenced so tagMp3 picks up the freshly-saved cover_url.
+                                (async () => {
+                                  let coverUrl: string | undefined;
+                                  try {
+                                    const { ensureAlbumCover } = await import('../services/album-cover.js');
+                                    const path = await import('path');
+                                    const { fileURLToPath } = await import('url');
+                                    const _fname = fileURLToPath(import.meta.url);
+                                    const _dir = path.dirname(_fname);
+                                    const PUBLIC_AUDIO_DIR = path.resolve(_dir, '../../public/audio');
+                                    coverUrl = await ensureAlbumCover({
+                                      userId: req.user!.id,
+                                      songId,
+                                      title: songTitle,
+                                      style: params.style,
+                                      publicAudioDir: PUBLIC_AUDIO_DIR,
+                                    });
+                                    // Persist cover_url to DB
+                                    await pool.query('UPDATE songs SET cover_url = ? WHERE id = ?', [coverUrl, songId]);
+                                  } catch (e: any) {
+                                    console.warn('[album-cover]', e?.message);
+                                  }
+                                  await _tagMp3({
+                                    id: songId,
+                                    title: songTitle,
+                                    lyrics: params.instrumental ? '[Instrumental]' : params.lyrics,
+                                    style: params.style,
+                                    caption: params.style,
+                                    audio_url: storedPath,
+                                    cover_url: coverUrl,
+                                    bpm: aceStatus.result.bpm || params.bpm,
+                                    key_scale: aceStatus.result.keyScale || params.keyScale,
+                                    duration: aceStatus.result.duration || params.duration,
+                                  }).catch((e: any) => console.warn('[mp3tag]', e.message));
+                                })().catch((e: any) => console.warn('[post-gen]', e?.message));
               } catch (downloadError) {
                 console.error(`Failed to download audio ${i + 1}:`, downloadError);
                 // Still create song record with remote URL
