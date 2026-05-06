@@ -47,14 +47,18 @@ export async function tagMp3(song: SongRecord): Promise<boolean> {
   }
   const tags: any = {
     title: song.title || 'Untitled',
-    artist: process.env.MP3_TAG_ARTIST || 'Owen',
-    album: process.env.MP3_TAG_ALBUM || 'ACE-Step Studio',
+    // Brand defaults — override per-deployment with MP3_TAG_ARTIST / MP3_TAG_ALBUM
+    // env vars in docker-compose.yml.
+    artist: process.env.MP3_TAG_ARTIST || 'Cubane Studio',
+    album: process.env.MP3_TAG_ALBUM || 'Cubane Studio',
     year: String(new Date().getFullYear()),
     genre: extractGenre(song.caption || song.style),
     comment: { language: 'eng', text: song.caption || song.style || '' },
     userDefinedText: [
       { description: 'STYLE', value: song.style || '' },
       { description: 'CAPTION', value: song.caption || '' },
+      // Provenance: AI-generated music should be transparent in metadata
+      { description: 'GENERATED_BY', value: 'ACE-Step v1.5 + Cubane Studio' },
     ],
   };
   if (song.bpm && song.bpm > 0) tags.bpm = String(Math.round(song.bpm));

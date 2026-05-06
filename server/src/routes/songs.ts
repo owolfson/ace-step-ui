@@ -591,6 +591,43 @@ router.post('/:id/like', authMiddleware, async (req: AuthenticatedRequest, res: 
 });
 
 // Get liked songs
+// POST /api/songs/retag-all — Backfill ID3 tags on all songs the user owns.
+// Useful one-shot for songs generated before mp3tagging.ts existed (pre-2026-05-05)
+// or for a brand rename (e.g. switching album from "ACE-Step Studio" to "Cubane Studio").
+router.post('/retag-all', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, title, lyrics, style, caption, cover_url, audio_url,
+              duration, bpm, key_scale
+       FROM songs WHERE user_id = $1`,
+      [req.user!.id]
+    );
+    let tagged = 0;
+    let skipped = 0;
+    for (const song of result.rows) {
+      try {
+        const ok = await tagMp3(song);
+        if (ok) tagged++; else skipped++;
+      } catch (e: any) {
+        console.warn('[retag-all] error on', song.id, e.message);
+        skipped++;
+      }
+    }
+    res.json({
+      total: result.rows.length,
+      tagged,
+      skipped,
+      brand: {
+        artist: process.env.MP3_TAG_ARTIST || 'Owen',
+        album: process.env.MP3_TAG_ALBUM || 'ACE-Step Studio',
+      },
+    });
+  } catch (error) {
+    console.error('[retag-all]', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Retag failed' });
+  }
+});
+
 router.get('/liked/list', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const result = await pool.query(
