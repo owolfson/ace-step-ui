@@ -220,7 +220,8 @@ function buildSvg(opts: {
   </svg>`;
 }
 
-/** Generate album cover PNG buffer from song metadata. */
+/** Generate procedural cover PNG (gradient + title + logo). Kept as fallback
+ *  for when picsum is unreachable. */
 export function generateAlbumCoverBuffer(opts: {
   title: string;
   style?: string;
@@ -241,8 +242,47 @@ export function generateAlbumCoverBuffer(opts: {
   return resvg.render().asPng();
 }
 
-/** Generate an album cover, save to public/audio/<userId>/<songId>-cover.png,
- *  return the /audio/... URL suitable for `cover_url` field. */
+/** Fetch a Lorem Picsum stock photo seeded by song ID — gives every song
+ *  a unique atmospheric cover with a "lofi indie album art" vibe. Branding
+ *  lives in ID3 tags (Cubane Studio / Infamous Media Productions), not on
+ *  the photo itself. Falls back to the procedural cover on network failure. */
+export async function fetchPicsumCoverBuffer(opts: {
+  seed: string;
+  title: string;
+  style?: string;
+  size?: number;
+}): Promise<Buffer> {
+  const size = opts.size || 1024;
+  const seed = encodeURIComponent(opts.seed || opts.title);
+  const url = `https://picsum.photos/seed/${seed}/${size}/${size}`;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(15_000), redirect: 'follow' });
+    if (!r.ok) throw new Error(`picsum HTTP ${r.status}`);
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length < 5_000) throw new Error('picsum returned tiny payload');
+    return buf;
+  } catch (e: any) {
+    console.warn('[album-cover] picsum fetch failed, falling back to procedural:', e?.message);
+    return generateAlbumCoverBuffer({ title: opts.title, style: opts.style, seed: opts.seed, size });
+  }
+}
+
+/** Detect MIME type from the first bytes of an image buffer. */
+function detectImageExt(buf: Buffer): 'jpg' | 'png' {
+  // JPEG: FF D8 FF
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  // PNG: 89 50 4E 47
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50) return 'png';
+  return 'jpg';  // picsum default
+}
+
+/** Generate an album cover, save to public/audio/<userId>/<songId>-cover.<ext>,
+ *  return the /audio/... URL suitable for `cover_url` field.
+ *
+ *  Strategy: fetch a Lorem Picsum stock photo seeded by song ID (gives the
+ *  "lofi indie album art" aesthetic Owen prefers — atmospheric photos, no
+ *  AI-generated look, branding in ID3 tags). Falls back to procedural
+ *  gradient + title + clapboard logo if picsum is unreachable. */
 export async function ensureAlbumCover(opts: {
   userId: string;
   songId: string;
@@ -253,16 +293,31 @@ export async function ensureAlbumCover(opts: {
 }): Promise<string> {
   const userDir = path.join(opts.publicAudioDir, opts.userId);
   await fs.promises.mkdir(userDir, { recursive: true });
-  const filename = `${opts.songId}-cover.png`;
-  const fullPath = path.join(userDir, filename);
-  if (!opts.force && fs.existsSync(fullPath)) {
-    return `/audio/${opts.userId}/${filename}`;
+
+  // Check for any existing cover in either extension (jpg or png) before regenerating
+  if (!opts.force) {
+    for (const ext of ['jpg', 'png']) {
+      const candidate = path.join(userDir, `${opts.songId}-cover.${ext}`);
+      if (fs.existsSync(candidate)) {
+        return `/audio/${opts.userId}/${opts.songId}-cover.${ext}`;
+      }
+    }
+  } else {
+    // Force regen: clean up old extensions so we don't leave orphans
+    for (const ext of ['jpg', 'png']) {
+      const old = path.join(userDir, `${opts.songId}-cover.${ext}`);
+      if (fs.existsSync(old)) await fs.promises.unlink(old).catch(() => {});
+    }
   }
-  const buf = generateAlbumCoverBuffer({
+
+  const buf = await fetchPicsumCoverBuffer({
+    seed: opts.songId,
     title: opts.title,
     style: opts.style,
-    seed: opts.songId,
   });
+  const ext = detectImageExt(buf);
+  const filename = `${opts.songId}-cover.${ext}`;
+  const fullPath = path.join(userDir, filename);
   await fs.promises.writeFile(fullPath, buf);
   return `/audio/${opts.userId}/${filename}`;
 }
