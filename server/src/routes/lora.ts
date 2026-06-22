@@ -161,18 +161,20 @@ function adapterVariant(fileName: string): string {
 }
 
 /**
- * Display label for one adapter file. Names by the owning LoRA directory and
- * only appends the file variant when a single folder ships more than one
- * adapter weight (e.g. raspy-vocal-5-loras).
+ * Display label for one adapter. Names by the owning LoRA directory and only
+ * appends the file variant when a single folder ships more than one adapter
+ * weight (e.g. raspy-vocal-5-loras).
  */
-function buildLoraLabel(loraName: string, fileName: string, weightCount: number): string {
+function buildLoraLabel(loraName: string, variant: string, weightCount: number): string {
   const base = prettifyName(loraName);
-  const variant = adapterVariant(fileName);
   if (variant && variant.toLowerCase() !== base.toLowerCase()) {
     return weightCount > 1 ? `${base} — ${variant}` : (base || variant);
   }
-  return base || fileName;
+  return base || variant;
 }
+
+// Internal entry carries the fields needed to dedupe, stripped before responding.
+type CollectedLora = LoraEntry & { depth: number; key: string };
 
 /**
  * Recursively collect `.safetensors` adapters under `root`. The first directory
@@ -180,8 +182,8 @@ function buildLoraLabel(loraName: string, fileName: string, weightCount: number)
  * that name so training shadow-copies don't surface as bare "adapter". Hidden
  * dirs (.cache, .git) are skipped.
  */
-async function collectLoras(root: string): Promise<(LoraEntry & { depth: number })[]> {
-  const found: (LoraEntry & { depth: number })[] = [];
+async function collectLoras(root: string): Promise<CollectedLora[]> {
+  const found: CollectedLora[] = [];
 
   async function walk(dir: string, loraName: string | null): Promise<void> {
     let entries: any[] = [];
@@ -209,14 +211,19 @@ async function collectLoras(root: string): Promise<(LoraEntry & { depth: number 
       try { sizeBytes = (await fs.stat(full)).size; } catch {}
       const m: any = meta[e.name] || {};
       const baseName = loraName || path.basename(dir);
+      const variant = adapterVariant(e.name);
 
       found.push({
         path: full,
-        label: m.label || buildLoraLabel(baseName, e.name, weightCount),
+        label: m.label || buildLoraLabel(baseName, variant, weightCount),
         collection: def.collection || baseName,
         description: m.description || def.description || '',
         sizeBytes,
         depth: full.split('/').length,
+        // Identity = LoRA dir + adapter variant. A top-level adapter and its
+        // final/adapter/ shadow copy share this even when meta.json gives the
+        // top-level a custom label, so they collapse to one entry.
+        key: `${baseName} ${variant}`,
       });
     }
   }
@@ -225,20 +232,20 @@ async function collectLoras(root: string): Promise<(LoraEntry & { depth: number 
   return found;
 }
 
-/** Drop shadow duplicates that resolve to the same label, keeping the shallowest path. */
-function dedupeByLabel(entries: (LoraEntry & { depth: number })[]): LoraEntry[] {
-  const byLabel = new Map<string, LoraEntry & { depth: number }>();
+/** Collapse shadow copies that share a LoRA identity, keeping the shallowest path. */
+function dedupeAdapters(entries: CollectedLora[]): LoraEntry[] {
+  const byKey = new Map<string, CollectedLora>();
   for (const entry of entries) {
-    const existing = byLabel.get(entry.label);
-    if (!existing || entry.depth < existing.depth) byLabel.set(entry.label, entry);
+    const existing = byKey.get(entry.key);
+    if (!existing || entry.depth < existing.depth) byKey.set(entry.key, entry);
   }
-  return [...byLabel.values()].map(({ depth, ...entry }) => entry);
+  return [...byKey.values()].map(({ depth, key, ...entry }) => entry);
 }
 
 router.get('/list', authMiddleware, async (_req, res) => {
   try {
     const root = process.env.LORA_ROOT || '/app/ACE-Step-1.5/checkpoints/loras';
-    const loras = dedupeByLabel(await collectLoras(root))
+    const loras = dedupeAdapters(await collectLoras(root))
       .sort((a, b) => (a.collection + a.label).localeCompare(b.collection + b.label));
     res.json({ loras, count: loras.length });
   } catch (error: any) {
