@@ -1,4 +1,6 @@
 import { Router, Response } from 'express';
+import { promises as fs } from 'fs';
+import path from 'path';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth.js';
 import { getGradioClient } from '../services/gradio-client.js';
 
@@ -129,50 +131,117 @@ router.get('/status', authMiddleware, async (_req: AuthenticatedRequest, res: Re
 });
 
 // ── List endpoint (LoRA picker) ────────────────────────────────────────────
-router.get('/list', authMiddleware, async (_req, res) => {
-  try {
-    const fs = await import('fs/promises');
-    const path = await import('path');
-    const root = process.env.LORA_ROOT || '/app/ACE-Step-1.5/checkpoints/loras';
-    const out = [];
-    async function walk(dir: string, collection: string) {
-      let entries: any[] = [];
-      try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
-      let meta: any = {};
-      for (const e of entries) {
-        if (e.isFile() && e.name === 'meta.json') {
-          try { meta = JSON.parse(await fs.readFile(path.join(dir, 'meta.json'), 'utf8')); } catch {}
-        }
-      }
-      const def: any = meta.default || {};
-      for (const e of entries) {
-        if (e.isDirectory()) {
-          await walk(path.join(dir, e.name), e.name);
-        } else if (e.isFile() && e.name.endsWith('.safetensors')) {
-          const full = path.join(dir, e.name);
-          let sizeBytes = 0;
-          try { sizeBytes = (await fs.stat(full)).size; } catch {}
-          const m: any = meta[e.name] || {};
-          const fallbackLabel = e.name
-            .replace(/_adapter_model\.safetensors$/, '')
-            .replace(/\.safetensors$/, '')
-            .replace(/_/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim() || e.name;
-          out.push({
-            path: full,
-            label: m.label || fallbackLabel,
-            collection: def.collection || collection,
-            description: m.description || def.description || '',
-            sizeBytes,
-          });
-        }
+
+const SAFETENSORS_EXT = '.safetensors';
+
+interface LoraEntry {
+  path: string;
+  label: string;
+  collection: string;
+  description: string;
+  sizeBytes: number;
+}
+
+/** Collapse a directory/file token into a human-friendly label. */
+function prettifyName(token: string): string {
+  return String(token || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/ +/g, ' ')
+    .trim();
+}
+
+/**
+ * Strip the generic "…adapter_model.safetensors" stem, leaving only a
+ * file-specific qualifier (e.g. "male_vocals", "voc_06_inst_14"). Returns an
+ * empty string for a plain `adapter_model.safetensors`.
+ */
+function adapterVariant(fileName: string): string {
+  const stem = fileName.slice(0, -SAFETENSORS_EXT.length);
+  return prettifyName(stem.replace(/_*adapter_model$/, ''));
+}
+
+/**
+ * Display label for one adapter file. Names by the owning LoRA directory and
+ * only appends the file variant when a single folder ships more than one
+ * adapter weight (e.g. raspy-vocal-5-loras).
+ */
+function buildLoraLabel(loraName: string, fileName: string, weightCount: number): string {
+  const base = prettifyName(loraName);
+  const variant = adapterVariant(fileName);
+  if (variant && variant.toLowerCase() !== base.toLowerCase()) {
+    return weightCount > 1 ? `${base} — ${variant}` : (base || variant);
+  }
+  return base || fileName;
+}
+
+/**
+ * Recursively collect `.safetensors` adapters under `root`. The first directory
+ * level names the LoRA; deeper dirs (final/, adapter/, checkpoint-N/) inherit
+ * that name so training shadow-copies don't surface as bare "adapter". Hidden
+ * dirs (.cache, .git) are skipped.
+ */
+async function collectLoras(root: string): Promise<(LoraEntry & { depth: number })[]> {
+  const found: (LoraEntry & { depth: number })[] = [];
+
+  async function walk(dir: string, loraName: string | null): Promise<void> {
+    let entries: any[] = [];
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+
+    let meta: any = {};
+    for (const e of entries) {
+      if (e.isFile() && e.name === 'meta.json') {
+        try { meta = JSON.parse(await fs.readFile(path.join(dir, 'meta.json'), 'utf8')); } catch {}
       }
     }
-    await walk(root, path.basename(root));
-    out.sort((a, b) => (a.collection + a.label).localeCompare(b.collection + b.label));
-    res.json({ loras: out, count: out.length });
-  } catch (error) {
+    const def: any = meta.default || {};
+    const weightCount = entries.filter(e => e.isFile() && e.name.endsWith(SAFETENSORS_EXT)).length;
+
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      if (e.isDirectory()) {
+        await walk(path.join(dir, e.name), loraName || e.name);
+        continue;
+      }
+      if (!e.isFile() || !e.name.endsWith(SAFETENSORS_EXT)) continue;
+
+      const full = path.join(dir, e.name);
+      let sizeBytes = 0;
+      try { sizeBytes = (await fs.stat(full)).size; } catch {}
+      const m: any = meta[e.name] || {};
+      const baseName = loraName || path.basename(dir);
+
+      found.push({
+        path: full,
+        label: m.label || buildLoraLabel(baseName, e.name, weightCount),
+        collection: def.collection || baseName,
+        description: m.description || def.description || '',
+        sizeBytes,
+        depth: full.split('/').length,
+      });
+    }
+  }
+
+  await walk(root, null);
+  return found;
+}
+
+/** Drop shadow duplicates that resolve to the same label, keeping the shallowest path. */
+function dedupeByLabel(entries: (LoraEntry & { depth: number })[]): LoraEntry[] {
+  const byLabel = new Map<string, LoraEntry & { depth: number }>();
+  for (const entry of entries) {
+    const existing = byLabel.get(entry.label);
+    if (!existing || entry.depth < existing.depth) byLabel.set(entry.label, entry);
+  }
+  return [...byLabel.values()].map(({ depth, ...entry }) => entry);
+}
+
+router.get('/list', authMiddleware, async (_req, res) => {
+  try {
+    const root = process.env.LORA_ROOT || '/app/ACE-Step-1.5/checkpoints/loras';
+    const loras = dedupeByLabel(await collectLoras(root))
+      .sort((a, b) => (a.collection + a.label).localeCompare(b.collection + b.label));
+    res.json({ loras, count: loras.length });
+  } catch (error: any) {
     console.error('[LoRA] List error:', error);
     res.status(500).json({ error: (error && error.message) || 'Failed to list LoRAs' });
   }
